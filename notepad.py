@@ -87,7 +87,7 @@ def save_encrypted_file():
 
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
-            f.write(f"<CIPHER={options['cipher']}><MODE={options['mode']}>\n")
+            f.write(f"CIPHER={options['cipher']}|MODE={options['mode']}\n")
             f.write(data)
         messagebox.showinfo("Success", "File saved and encrypted successfully.")
     except Exception as e:
@@ -99,25 +99,28 @@ def asset_path(filename):
 
 def save_file():
     file_path = filedialog.asksaveasfilename(defaultextension=".txt",
-                                             filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
+                                             filetypes=[("Text files", "*.txt")])
     if file_path:
         with open(file_path, 'w', encoding="utf-8") as f:
             f.write(text_area.get(1.0, tk.END))
-        text_area.edit_seperator()
+        text_area.edit_separator()
 
 def open_file():
-    file_path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
+    file_path = filedialog.askopenfilename(filetypes=[("Text/Encrypted", "*.txt *.enc"), ("Text files", "*.txt"), ("Encrypted files", "*.enc")])
+
     if file_path:
+        with open(file_path, 'r', encoding="utf-8") as f:
+            content = f.read()
         if file_path.endswith('.enc'):
-            # Check for <CIPHER={options['cipher']}><MODE={options['mode']}>
+            cipher = content.split('CIPHER=')[1].split('|')[0]
+            mode = content.split('MODE=')[1].split('\n')[0]
+            content = '\n'.join(content.split('\n')[1:])
+            messagebox.showinfo("Encrypted File", f"File is encrypted with options: {cipher}, {mode}")
             
-        else:
-            with open(file_path, 'r', encoding="utf-8") as f:
-                content = f.read()
-            text_area.delete(1.0, tk.END)
-            text_area.insert(tk.END, content)
-            text_area.edit_reset()
-            text_area.edit_modified(False)
+        text_area.delete(1.0, tk.END)
+        text_area.insert(tk.END, content)
+        text_area.edit_reset()
+        text_area.edit_modified(False)
 
 def zoom_in():
     current_font = text_area.cget("font").split()
@@ -155,10 +158,6 @@ if os.path.exists(icon_file):
 else:
     print("Icon file not found.")
 
-#if app_image:
-    #banner = tk.Label(root, image=app_image)
-    #banner.pack(anchor='nw', padx=5, pady=5)
-
 menu_bar = tk.Menu(root)
 file_menu = tk.Menu(menu_bar, tearoff=0)
 file_menu.add_command(label="Open", command=open_file)
@@ -174,8 +173,8 @@ edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=do_redo)
 menu_bar.add_cascade(label="Edit", menu=edit_menu)
 
 view_menu = tk.Menu(menu_bar, tearoff=0)
-view_menu.add_command(label="Zoom In", accelerator="Ctrl++", command=zoom_in)
-view_menu.add_command(label="Zoom Out", command=zoom_out)
+view_menu.add_command(label="Zoom In", accelerator="Ctrl+", command=zoom_in)
+view_menu.add_command(label="Zoom Out", accelerator="Ctrl-", command=zoom_out)
 menu_bar.add_cascade(label="View", menu=view_menu)
 
 root.config(menu=menu_bar)
