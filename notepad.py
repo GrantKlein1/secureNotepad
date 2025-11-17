@@ -108,12 +108,16 @@ def save_file():
 def open_file():
     file_path = filedialog.askopenfilename(filetypes=[("Text files", "*.txt")])
     if file_path:
-        with open(file_path, 'r', encoding="utf-8") as f:
-            content = f.read()
-        text_area.delete(1.0, tk.END)
-        text_area.insert(tk.END, content)
-        text_area.edit_reset()
-        text_area.edit_modified(False)
+        if file_path.endswith('.enc'):
+            # Check for <CIPHER={options['cipher']}><MODE={options['mode']}>
+            
+        else:
+            with open(file_path, 'r', encoding="utf-8") as f:
+                content = f.read()
+            text_area.delete(1.0, tk.END)
+            text_area.insert(tk.END, content)
+            text_area.edit_reset()
+            text_area.edit_modified(False)
 
 def zoom_in():
     current_font = text_area.cget("font").split()
