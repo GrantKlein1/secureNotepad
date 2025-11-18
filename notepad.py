@@ -2,6 +2,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
 import os, sys
+from Crypto.Cipher import AES, DES3, Blowfish
+from Crypto.Hash import HMAC, SHA256
+from Crypto.Random import get_random_bytes
 
 root = tk.Tk()
 root.title("notepad")
@@ -77,9 +80,15 @@ def save_encrypted_file():
     if not options:
         return 
 
+    #Prompt user for password here
+    #When doing this, you'll need to ask the user for a password, which they will use to decrypt the
+    #file as well. Using this password, you should generate an encryption key by hashing the password using SHA-256
+    password = tk.simpledialog.askstring("Password", "Enter a password for encryption:", show='*')
+    password_encrypted = SHA256.new(password.encode('utf-8')).digest()
+    
     file_path = filedialog.asksaveasfilename(defaultextension=".enc",
                                              filetypes=[("Encrypted files", "*.enc")])
-    
+
     if not file_path:
         return
 
@@ -88,7 +97,32 @@ def save_encrypted_file():
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
             f.write(f"CIPHER={options['cipher']}|MODE={options['mode']}\n")
-            f.write(data)
+            #HERE NEED TO ENCRYPT DATA BEFORE WRITING
+            if options['cipher'] == "AES-256":
+                cipher = AES.new(password_encrypted, AES.MODE_GCM)
+                ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
+                f.write(cipher.nonce.hex() + '|' + tag.hex() + '|' + ciphertext.hex())
+            elif options['cipher'] == "Blowfish":
+                cipher = Blowfish.new(password_encrypted[:16], Blowfish.MODE_CBC)
+                plen = 8 - len(data) % 8
+                padding = [plen]*plen
+                padding = bytes(padding)
+                data_padded = data.encode('utf-8') + padding
+                ciphertext = cipher.encrypt(data_padded)
+                f.write(cipher.iv.hex() + '|' + ciphertext.hex())
+            elif options['cipher'] == "3DES":
+                cipher = DES3.new(password_encrypted[:24], DES3.MODE_CBC)
+                plen = 8 - len(data) % 8
+                padding = [plen]*plen
+                padding = bytes(padding)
+                data_padded = data.encode('utf-8') + padding
+                ciphertext = cipher.encrypt(data_padded)
+                f.write(cipher.iv.hex() + '|' + ciphertext.hex())
+            else:
+                f.write(data)
+                messagebox.showerror("Error", "Unsupported cipher.")
+                return
+
         messagebox.showinfo("Success", "File saved and encrypted successfully.")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to save encrypted file: {e}")
@@ -115,7 +149,47 @@ def open_file():
             cipher = content.split('CIPHER=')[1].split('|')[0]
             mode = content.split('MODE=')[1].split('\n')[0]
             content = '\n'.join(content.split('\n')[1:])
-            messagebox.showinfo("Encrypted File", f"File is encrypted with options: {cipher}, {mode}")
+            password = tk.simpledialog.askstring("Password", "Enter a password for decryption:", show='*')
+            nonce = bytes.fromhex(content.split('|')[0])
+            tag = bytes.fromhex(content.split('|')[1])
+            ciphertext = bytes.fromhex(content.split('|')[2])
+            if cipher == "AES-256":
+                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
+                if mode == "GCM":
+                    cipher = AES.new(password_encrypted, AES.MODE_GCM, nonce=nonce)
+                elif mode == "CBC":
+                    cipher = AES.new(password_encrypted, AES.MODE_CBC, iv=nonce)
+                elif mode == "ECB":
+                    cipher = AES.new(password_encrypted, AES.MODE_ECB)
+                else:
+                    messagebox.showerror("Error", "Unsupported mode.")
+                    return 
+            elif cipher == "Blowfish":
+                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
+                if mode == "GCM":
+                    cipher = Blowfish.new(password_encrypted, Blowfish.MODE_GCM, nonce=nonce)
+                elif mode == "ECB":
+                    cipher = Blowfish.new(password_encrypted, Blowfish.MODE_ECB)
+                else:
+                    messagebox.showerror("Error", "Unsupported mode.")
+                    return
+            elif cipher == "3DES":
+                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
+                if mode == "GCM":
+                    cipher = DES3.new(password_encrypted, DES3.MODE_GCM, nonce=nonce)
+                elif mode == "CBC":
+                    cipher = DES3.new(password_encrypted, DES3.MODE_CBC, iv=nonce)
+                elif mode == "ECB":
+                    cipher = DES3.new(password_encrypted, DES3.MODE_ECB)
+                else:
+                    messagebox.showerror("Error", "Unsupported mode.")
+                    return
+            else:
+                messagebox.showerror("Error", "Unsupported cipher.")
+                return
+
+            data = cipher.decrypt_and_verify(ciphertext, tag)
+            content = data.decode('utf-8') 
             
         text_area.delete(1.0, tk.END)
         text_area.insert(tk.END, content)
@@ -135,6 +209,16 @@ def zoom_out():
     if font_size >= 8:
         text_area.config(font=(font_name, font_size))
 
+def new_file():
+    if text_area.edit_modified():
+        if messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to save before creating a new file?"):
+            if messagebox.askyesno("Encrypted/Plaintext", "Do you want to save the current file as encrypted?"):
+                save_encrypted_file()
+            else:
+                save_file()
+    text_area.delete(1.0, tk.END)
+    text_area.edit_reset()
+    text_area.edit_modified(False)
 
 root.event_add('<<ZoomIn>>',
                '<Control-plus>',      
@@ -143,8 +227,18 @@ root.event_add('<<ZoomIn>>',
                '<Control-KP_Add>')   
 root.bind_all('<<ZoomIn>>', lambda event: zoom_in())
 root.bind('<Control-minus>', lambda event: zoom_out())
-root.bind('<Control-z>', lambda event: text_area.edit_undo())
-root.bind('<Control-y>', lambda event: text_area.edit_redo())
+root.event_add('<<Undo>>', '<Control-Shift-Z>', '<Control-Shift-z>', '<Control-z>')
+root.bind('<<Undo>>', lambda event: text_area.edit_undo())
+root.event_add('<<Redo>>', '<Control-Shift-Y>', '<Control-Shift-y>', '<Control-y>')
+root.bind('<<Redo>>', lambda event: text_area.edit_redo())
+root.event_add('<<Save>>', '<Control-s>', '<Control-S>')
+root.bind('<<Save>>', lambda event: save_file())
+root.event_add('<<SaveEncrypted>>', '<Control-Shift-E>', '<Control-Shift-e>')
+root.bind('<<SaveEncrypted>>', lambda event: save_encrypted_file())
+root.event_add('<<Open>>', '<Control-o>', '<Control-O>')
+root.bind('<<Open>>', lambda event: open_file())
+root.event_add('<<NewFile>>', '<Control-n>', '<Control-N>')
+root.bind('<<NewFile>>', lambda event: new_file())
 
 icon_file = asset_path("images/notepadIcon.png")
 app_image = None
@@ -160,6 +254,7 @@ else:
 
 menu_bar = tk.Menu(root)
 file_menu = tk.Menu(menu_bar, tearoff=0)
+file_menu.add_command(label="New", command=new_file)
 file_menu.add_command(label="Open", command=open_file)
 file_menu.add_command(label="Save", command=save_file)
 file_menu.add_command(label="Save Encrypted", command=save_encrypted_file)
