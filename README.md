@@ -41,22 +41,44 @@ cryptoSecureNotepad/
 
 ---
 
-## Running (Source)
+## How to Run Crypto Secure Notepad
 
-```powershell
-cd "c:\Users\panda\Personal Files\cryptoSecureNotepad"
-python notepad.py
-```
+### Prerequisites
+- Python 3.10+ installed
+- pip available in your PATH
 
----
+Optional (for packaging to an .exe/.app/.bin):
+- PyInstaller
 
-## Building Executable (PyInstaller)
+### Build a standalone executable (Windows/macOS/Linux)
 
-```powershell
+1) Install PyInstaller
+```bash
 pip install --upgrade pyinstaller
-pyinstaller notepad.spec
-# EXE: dist\cryptoSecureNotepad\cryptoSecureNotepad.exe
 ```
+
+2) Build using the provided spec
+```bash
+pyinstaller notepad.spec
+```
+
+3) Run the built binary
+- Windows: `dist/cryptoSecureNotepad/cryptoSecureNotepad.exe`
+- macOS: `dist/cryptoSecureNotepad/cryptoSecureNotepad` (may need: `chmod +x` and Gatekeeper approval)
+- Linux: `dist/cryptoSecureNotepad/cryptoSecureNotepad` (`chmod +x` if needed)
+
+### Using the app
+
+- Open: File → Open (supports .txt and .enc)
+- Save: File → Save (plaintext .txt)
+- Save Encrypted: File → Save Encrypted
+  - Pick a cipher/mode in the popup (placeholders available)
+  - Enter a password when prompted
+- Undo/Redo: Ctrl+Z / Ctrl+Y
+- Zoom: Ctrl+Plus / Ctrl+Minus
+- Optional formatting: Bold/Italic and size tags via menu/shortcuts
+
+Note: The current encryption is a learning prototype and not production-secure. Do not store sensitive data.
 
 ---
 
