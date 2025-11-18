@@ -78,5 +78,3 @@ pyinstaller notepad.spec
 ## Disclaimer
 
 Educational prototype; not audited. Use at your own risk. Encryption must be refactored for real-world protection.
-
----
