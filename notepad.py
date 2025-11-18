@@ -12,6 +12,8 @@ root.title("notepad")
 text_area = tk.Text(root, wrap='word', font=("Arial", 12), undo=True, autoseparators=True, maxundo=-1)
 text_area.pack(expand=True, fill='both')
 
+current_text_size = 10
+
 class EncryptionOptionPopup(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -220,6 +222,60 @@ def new_file():
     text_area.edit_reset()
     text_area.edit_modified(False)
 
+def set_text_size(font_size_label):
+    def inner():
+        size_map = {
+            "title": 24,
+            "subtitle": 20,
+            "heading": 18,
+            "subheading": 16,
+            "section": 14,
+            "subsection": 12,
+            "body": 10
+        }
+        size = size_map.get(font_size_label, 10)
+
+        if text_area.tag_ranges("sel"):
+            start_index = text_area.index("sel.first")
+            end_index = text_area.index("sel.last")    
+            messagebox.showinfo("Info", "Applying font size tag." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
+            text_area.tag_add(f"size_{size}", start_index, end_index)
+            messagebox.showinfo("Info", "Raising font size tag." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
+            text_area.tag_raise(f"size_{size}")
+            messagebox.showinfo("Info", "Changing size of selected text." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
+            text_area.tag_configure(f"size_{size}", font=(text_area.cget("font").split()[0], size))
+        else:
+            current_font = text_area.cget("font").split()
+            font_name = current_font[0]
+            text_area.config(font=(font_name, size))
+        
+        current_text_size = size
+
+    return inner
+
+def bold_text():
+    if text_area.tag_ranges("sel"):
+        start_index = text_area.index("sel.first")
+        end_index = text_area.index("sel.last")
+        text_area.tag_add("bold", start_index, end_index)
+        text_area.tag_configure("bold", font=(text_area.cget("font").split()[0], current_text_size, "bold"))
+    else:
+        current_font = text_area.cget("font").split()
+        font_name = current_font[0]
+        text_area.config(font=(font_name, current_text_size, "bold"))
+
+def italicize_text():
+    if text_area.tag_ranges("sel"):
+        start_index = text_area.index("sel.first")
+        end_index = text_area.index("sel.last")
+        text_area.tag_add("italic", start_index, end_index)
+        text_area.tag_configure("italic", font=(text_area.cget("font").split()[0], current_text_size, "italic"))
+    else:
+        current_font = text_area.cget("font").split()
+        font_name = current_font[0]
+        font_size = int(current_font[1])
+        text_area.config(font=(font_name, current_text_size, "italic"))
+
 root.event_add('<<ZoomIn>>',
                '<Control-plus>',      
                '<Control-Shift-=>',    
@@ -239,6 +295,8 @@ root.event_add('<<Open>>', '<Control-o>', '<Control-O>')
 root.bind('<<Open>>', lambda event: open_file())
 root.event_add('<<NewFile>>', '<Control-n>', '<Control-N>')
 root.bind('<<NewFile>>', lambda event: new_file())
+root.bind('<Control-b>', lambda event: bold_text())
+root.bind('<Control-i>', lambda event: italicize_text())
 
 icon_file = asset_path("images/notepadIcon.png")
 app_image = None
@@ -271,6 +329,24 @@ view_menu = tk.Menu(menu_bar, tearoff=0)
 view_menu.add_command(label="Zoom In", accelerator="Ctrl+", command=zoom_in)
 view_menu.add_command(label="Zoom Out", accelerator="Ctrl-", command=zoom_out)
 menu_bar.add_cascade(label="View", menu=view_menu)
+
+text_size_menu = tk.Menu(menu_bar, tearoff=0)
+text_size_menu.add_command(label="Title", command=set_text_size("title"))
+text_size_menu.add_command(label="Subtitle", command=set_text_size("subtitle"))
+text_size_menu.add_command(label="Heading", command=set_text_size("heading"))
+text_size_menu.add_command(label="Subheading", command=set_text_size("subheading"))
+text_size_menu.add_command(label="Section", command=set_text_size("section"))
+text_size_menu.add_command(label="Subsection", command=set_text_size("subsection"))
+text_size_menu.add_command(label="Body", command=set_text_size("body"))
+menu_bar.add_cascade(label="H1", menu=text_size_menu)
+
+bold_menu = tk.Menu(menu_bar, tearoff=0)
+bold_menu.add_command(label="Bold", command=bold_text)
+menu_bar.add_cascade(label="B", menu=bold_menu)
+
+italics_menu = tk.Menu(menu_bar, tearoff=0)
+italics_menu.add_command(label="Italics", command=italicize_text)
+menu_bar.add_cascade(label="I", menu=italics_menu)
 
 root.config(menu=menu_bar)
 root.mainloop()
