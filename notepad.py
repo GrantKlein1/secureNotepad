@@ -5,6 +5,7 @@ import os, sys
 from Crypto.Cipher import AES, DES3, Blowfish
 from Crypto.Hash import HMAC, SHA256
 from Crypto.Random import get_random_bytes
+from Crypto.Util.Padding import pad, unpad
 
 root = tk.Tk()
 root.title("notepad")
@@ -13,6 +14,107 @@ text_area = tk.Text(root, wrap='word', font=("Arial", 12), undo=True, autosepara
 text_area.pack(expand=True, fill='both')
 
 current_text_size = 10
+
+SUPPORTED_MODES = {
+    "AES-256": ["GCM", "CBC", "ECB"],
+    "Blowfish": ["CBC", "ECB"],
+    "3DES": ["CBC", "ECB"],
+}
+
+MODE_COMPONENTS = {
+    "GCM": 3,
+    "CBC": 2,
+    "ECB": 1,
+}
+
+BLOCK_SIZES = {
+    "AES-256": AES.block_size,
+    "Blowfish": Blowfish.block_size,
+    "3DES": DES3.block_size,
+}
+
+
+def _derive_password_bytes(password):
+    if not password:
+        raise ValueError("Password is required for encryption.")
+    return SHA256.new(password.encode("utf-8")).digest()
+
+
+def _derive_key(cipher_name, password_bytes):
+    if cipher_name == "AES-256":
+        return password_bytes
+    if cipher_name == "Blowfish":
+        return password_bytes[:32]
+    if cipher_name == "3DES":
+        key_material = password_bytes[:24]
+        while True:
+            try:
+                return DES3.adjust_key_parity(key_material)
+            except ValueError:
+                key_material = SHA256.new(key_material).digest()[:24]
+    raise ValueError(f"Unsupported cipher: {cipher_name}")
+
+
+def _encrypt_payload(cipher_name, mode, plaintext_bytes, password_bytes):
+    key = _derive_key(cipher_name, password_bytes)
+    block_size = BLOCK_SIZES[cipher_name]
+
+    if cipher_name == "AES-256" and mode == "GCM":
+        nonce = get_random_bytes(12)
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        ciphertext, tag = cipher.encrypt_and_digest(plaintext_bytes)
+        return [nonce, tag, ciphertext]
+
+    if mode == "GCM":
+        raise ValueError(f"{cipher_name} does not support GCM mode.")
+
+    if mode == "CBC":
+        iv = get_random_bytes(block_size)
+        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+        cipher = cipher_cls.new(key, cipher_cls.MODE_CBC, iv=iv)
+        ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
+        return [iv, ciphertext]
+
+    if mode == "ECB":
+        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+        cipher = cipher_cls.new(key, cipher_cls.MODE_ECB)
+        ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
+        return [ciphertext]
+
+    raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
+
+
+def _decrypt_payload(cipher_name, mode, password_bytes, hex_parts):
+    expected_parts = MODE_COMPONENTS.get(mode)
+    if expected_parts is None:
+        raise ValueError(f"Unsupported mode: {mode}")
+    if len(hex_parts) != expected_parts:
+        raise ValueError("Encrypted file is corrupted or mode metadata is incorrect.")
+
+    key = _derive_key(cipher_name, password_bytes)
+    block_size = BLOCK_SIZES[cipher_name]
+
+    if cipher_name == "AES-256" and mode == "GCM":
+        nonce = bytes.fromhex(hex_parts[0])
+        tag = bytes.fromhex(hex_parts[1])
+        ciphertext = bytes.fromhex(hex_parts[2])
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        return cipher.decrypt_and_verify(ciphertext, tag)
+
+    if mode == "CBC":
+        iv = bytes.fromhex(hex_parts[0])
+        ciphertext = bytes.fromhex(hex_parts[1])
+        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+        cipher = cipher_cls.new(key, cipher_cls.MODE_CBC, iv=iv)
+        return unpad(cipher.decrypt(ciphertext), block_size)
+
+    if mode == "ECB":
+        ciphertext = bytes.fromhex(hex_parts[0])
+        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+        cipher = cipher_cls.new(key, cipher_cls.MODE_ECB)
+        return unpad(cipher.decrypt(ciphertext), block_size)
+
+    raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
 
 class EncryptionOptionPopup(tk.Toplevel):
     def __init__(self, parent):
@@ -30,14 +132,25 @@ class EncryptionOptionPopup(tk.Toplevel):
         frm.grid(sticky="nsew")
 
         ttk.Label(frm, text="Cipher").grid(row=0, column=0, sticky="w")
-        ciphers = ["AES-256", "Blowfish", "3DES"]
+        ciphers = list(SUPPORTED_MODES.keys())
         for i, cipher in enumerate(ciphers):
-            ttk.Radiobutton(frm, text=cipher, variable=self.cipher_var, value=cipher).grid(row=i+1, column=0, sticky="w")
-        
-        ttk.Label(frm, text="Mode").grid(row=0, column=1, sticky="w", padx=(20,0))
-        modes = ["GCM", "CBC", "ECB"]
+            ttk.Radiobutton(
+                frm,
+                text=cipher,
+                variable=self.cipher_var,
+                value=cipher,
+                command=self._on_cipher_change,
+            ).grid(row=i + 1, column=0, sticky="w")
+
+        ttk.Label(frm, text="Mode").grid(row=0, column=0, sticky="w")
+        modes = list(SUPPORTED_MODES.values())[0]
         for i, mode in enumerate(modes):
-            ttk.Radiobutton(frm, text=mode, variable=self.mode_var, value=mode).grid(row=i+1, column=1, sticky="w", padx=(20,0))
+            ttk.Radiobutton(
+                frm,
+                text=mode,
+                variable=self.mode_var,
+                value=mode,
+            ).grid(row=i + 1, column=1, sticky="w", padx=(20, 0))
 
         btns = ttk.Frame(frm)
         btns.grid(row=4, column = 0, columnspan=2, pady=(12,0), sticky="e")
@@ -48,6 +161,12 @@ class EncryptionOptionPopup(tk.Toplevel):
         self.bind("<Escape>", lambda event: self.on_cancel())
         self.update_idletasks()
         self.geometry(f"+{parent.winfo_rootx() + 40}+{parent.winfo_rooty() + 40}")
+
+    def _on_cipher_change(self):
+        modes = SUPPORTED_MODES[self.cipher_var.get()]
+        self.mode_combo.configure(values=modes)
+        if self.mode_var.get() not in modes:
+            self.mode_combo.current(0)
 
     def on_cancel(self):
         self.result = None
@@ -63,6 +182,12 @@ class EncryptionOptionPopup(tk.Toplevel):
 def choose_encryption_options():
     popup = EncryptionOptionPopup(root)
     root.wait_window(popup)
+    if popup.result["cipher"] == "Blowfish" and popup.result["mode"] == "GCM":
+        messagebox.showerror("Invalid Selection", "Blowfish does not support GCM mode. Please choose a different combination.")
+        return choose_encryption_options()
+    elif popup.result["cipher"] == "3DES" and popup.result["mode"] == "GCM":
+        messagebox.showerror("Invalid Selection", "3DES does not support GCM mode. Please choose a different combination.")
+        return choose_encryption_options()
     return popup.result
 
 def do_undo(event=None):
@@ -82,11 +207,14 @@ def save_encrypted_file():
     if not options:
         return 
 
-    #Prompt user for password here
-    #When doing this, you'll need to ask the user for a password, which they will use to decrypt the
-    #file as well. Using this password, you should generate an encryption key by hashing the password using SHA-256
-    password = tk.simpledialog.askstring("Password", "Enter a password for encryption:", show='*')
-    password_encrypted = SHA256.new(password.encode('utf-8')).digest()
+    try:
+        password = tk.simpledialog.askstring("Password", "Enter a password for encryption:", show='*')
+        if not password:
+            return
+        password_encrypted = _derive_password_bytes(password)
+    except ValueError as exc:
+        messagebox.showerror("Error", str(exc))
+        return
     
     file_path = filedialog.asksaveasfilename(defaultextension=".enc",
                                              filetypes=[("Encrypted files", "*.enc")])
@@ -94,36 +222,13 @@ def save_encrypted_file():
     if not file_path:
         return
 
-    data = text_area.get("1.0", "end-1c")
+    data = text_area.get("1.0", "end-1c").encode("utf-8")
 
     try:
         with open(file_path, 'w', encoding="utf-8") as f:
             f.write(f"CIPHER={options['cipher']}|MODE={options['mode']}\n")
-            #HERE NEED TO ENCRYPT DATA BEFORE WRITING
-            if options['cipher'] == "AES-256":
-                cipher = AES.new(password_encrypted, AES.MODE_GCM)
-                ciphertext, tag = cipher.encrypt_and_digest(data.encode('utf-8'))
-                f.write(cipher.nonce.hex() + '|' + tag.hex() + '|' + ciphertext.hex())
-            elif options['cipher'] == "Blowfish":
-                cipher = Blowfish.new(password_encrypted[:16], Blowfish.MODE_CBC)
-                plen = 8 - len(data) % 8
-                padding = [plen]*plen
-                padding = bytes(padding)
-                data_padded = data.encode('utf-8') + padding
-                ciphertext = cipher.encrypt(data_padded)
-                f.write(cipher.iv.hex() + '|' + ciphertext.hex())
-            elif options['cipher'] == "3DES":
-                cipher = DES3.new(password_encrypted[:24], DES3.MODE_CBC)
-                plen = 8 - len(data) % 8
-                padding = [plen]*plen
-                padding = bytes(padding)
-                data_padded = data.encode('utf-8') + padding
-                ciphertext = cipher.encrypt(data_padded)
-                f.write(cipher.iv.hex() + '|' + ciphertext.hex())
-            else:
-                f.write(data)
-                messagebox.showerror("Error", "Unsupported cipher.")
-                return
+            payload_parts = _encrypt_payload(options['cipher'], options['mode'], data, password_encrypted)
+            f.write('|'.join(part.hex() for part in payload_parts))
 
         messagebox.showinfo("Success", "File saved and encrypted successfully.")
     except Exception as e:
@@ -148,51 +253,43 @@ def open_file():
         with open(file_path, 'r', encoding="utf-8") as f:
             content = f.read()
         if file_path.endswith('.enc'):
-            cipher = content.split('CIPHER=')[1].split('|')[0]
-            mode = content.split('MODE=')[1].split('\n')[0]
-            content = '\n'.join(content.split('\n')[1:])
-            password = tk.simpledialog.askstring("Password", "Enter a password for decryption:", show='*')
-            nonce = bytes.fromhex(content.split('|')[0])
-            tag = bytes.fromhex(content.split('|')[1])
-            ciphertext = bytes.fromhex(content.split('|')[2])
-            if cipher == "AES-256":
-                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
-                if mode == "GCM":
-                    cipher = AES.new(password_encrypted, AES.MODE_GCM, nonce=nonce)
-                elif mode == "CBC":
-                    cipher = AES.new(password_encrypted, AES.MODE_CBC, iv=nonce)
-                elif mode == "ECB":
-                    cipher = AES.new(password_encrypted, AES.MODE_ECB)
-                else:
-                    messagebox.showerror("Error", "Unsupported mode.")
-                    return 
-            elif cipher == "Blowfish":
-                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
-                if mode == "GCM":
-                    cipher = Blowfish.new(password_encrypted, Blowfish.MODE_GCM, nonce=nonce)
-                elif mode == "ECB":
-                    cipher = Blowfish.new(password_encrypted, Blowfish.MODE_ECB)
-                else:
-                    messagebox.showerror("Error", "Unsupported mode.")
-                    return
-            elif cipher == "3DES":
-                password_encrypted = SHA256.new(password.encode('utf-8')).digest()
-                if mode == "GCM":
-                    cipher = DES3.new(password_encrypted, DES3.MODE_GCM, nonce=nonce)
-                elif mode == "CBC":
-                    cipher = DES3.new(password_encrypted, DES3.MODE_CBC, iv=nonce)
-                elif mode == "ECB":
-                    cipher = DES3.new(password_encrypted, DES3.MODE_ECB)
-                else:
-                    messagebox.showerror("Error", "Unsupported mode.")
-                    return
-            else:
-                messagebox.showerror("Error", "Unsupported cipher.")
+            lines = content.splitlines()
+            if not lines:
+                messagebox.showerror("Error", "Encrypted file is empty or corrupted.")
+                return
+            header = lines[0]
+            body = ''.join(lines[1:]).strip()
+            if not body:
+                messagebox.showerror("Error", "Encrypted file payload is missing.")
+                return
+            try:
+                cipher_name = header.split('CIPHER=')[1].split('|')[0]
+                mode = header.split('MODE=')[1].split('|')[0]
+            except (IndexError, ValueError):
+                messagebox.showerror("Error", "Encrypted file header is invalid.")
                 return
 
-            data = cipher.decrypt_and_verify(ciphertext, tag)
-            content = data.decode('utf-8') 
-            
+            if mode not in SUPPORTED_MODES.get(cipher_name, []):
+                messagebox.showerror("Error", f"Unsupported cipher/mode combination in file: {cipher_name} / {mode}")
+                return
+
+            parts = body.split('|')
+            if parts and parts[-1] == '':
+                parts = parts[:-1]
+            try:
+                password = tk.simpledialog.askstring("Password", "Enter a password for decryption:", show='*')
+                if not password:
+                    return
+                password_encrypted = _derive_password_bytes(password)
+                data = _decrypt_payload(cipher_name, mode, password_encrypted, parts)
+                content = data.decode('utf-8')
+            except ValueError as exc:
+                messagebox.showerror("Error", f"Decryption failed: {exc}")
+                return
+            except Exception as exc:  # wrong password or corrupt data
+                messagebox.showerror("Error", f"Unable to decrypt file: {exc}")
+                return
+
         text_area.delete(1.0, tk.END)
         text_area.insert(tk.END, content)
         text_area.edit_reset()
@@ -238,11 +335,8 @@ def set_text_size(font_size_label):
         if text_area.tag_ranges("sel"):
             start_index = text_area.index("sel.first")
             end_index = text_area.index("sel.last")    
-            messagebox.showinfo("Info", "Applying font size tag." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
             text_area.tag_add(f"size_{size}", start_index, end_index)
-            messagebox.showinfo("Info", "Raising font size tag." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
             text_area.tag_raise(f"size_{size}")
-            messagebox.showinfo("Info", "Changing size of selected text." + f"size_{size}" + "startIndex: " + start_index + "endIndex: " + end_index + "font: ")
             text_area.tag_configure(f"size_{size}", font=(text_area.cget("font").split()[0], size))
         else:
             current_font = text_area.cget("font").split()
@@ -289,7 +383,7 @@ root.event_add('<<Redo>>', '<Control-Shift-Y>', '<Control-Shift-y>', '<Control-y
 root.bind('<<Redo>>', lambda event: text_area.edit_redo())
 root.event_add('<<Save>>', '<Control-s>', '<Control-S>')
 root.bind('<<Save>>', lambda event: save_file())
-root.event_add('<<SaveEncrypted>>', '<Control-Shift-E>', '<Control-Shift-e>')
+root.event_add('<<SaveEncrypted>>', '<Control-E>', '<Control-e>')
 root.bind('<<SaveEncrypted>>', lambda event: save_encrypted_file())
 root.event_add('<<Open>>', '<Control-o>', '<Control-O>')
 root.bind('<<Open>>', lambda event: open_file())
@@ -297,6 +391,7 @@ root.event_add('<<NewFile>>', '<Control-n>', '<Control-N>')
 root.bind('<<NewFile>>', lambda event: new_file())
 root.bind('<Control-b>', lambda event: bold_text())
 root.bind('<Control-i>', lambda event: italicize_text())
+
 
 icon_file = asset_path("images/notepadIcon.png")
 app_image = None
@@ -312,10 +407,10 @@ else:
 
 menu_bar = tk.Menu(root)
 file_menu = tk.Menu(menu_bar, tearoff=0)
-file_menu.add_command(label="New", command=new_file)
-file_menu.add_command(label="Open", command=open_file)
-file_menu.add_command(label="Save", command=save_file)
-file_menu.add_command(label="Save Encrypted", command=save_encrypted_file)
+file_menu.add_command(label="New", accelerator="Ctrl+N", command=new_file)
+file_menu.add_command(label="Open", accelerator="Ctrl+O", command=open_file)
+file_menu.add_command(label="Save", accelerator="Ctrl+S", command=save_file)
+file_menu.add_command(label="Save Encrypted", accelerator="Ctrl+E", command=save_encrypted_file)
 file_menu.add_separator()
 file_menu.add_command(label="Exit", command=root.quit)
 menu_bar.add_cascade(label="File", menu=file_menu)
