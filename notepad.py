@@ -15,16 +15,20 @@ text_area.pack(expand=True, fill='both')
 
 current_text_size = 10
 
+# Allowed cipher/mode pairs that wil work and the UI will accept.
+# AES supports all three while Blowfish and 3DES only support CBC/ECB.
 SUPPORTED_MODES = {
     "AES-256": ["GCM", "CBC", "ECB"],
     "Blowfish": ["CBC", "ECB"],
     "3DES": ["CBC", "ECB"],
 }
 
+# Number of hex components expected in the serialized payload line for each mode.
+# GCM: nonce|tag|ciphertext, CBC: iv|ciphertext|digest, ECB: ciphertext|digest
 MODE_COMPONENTS = {
     "GCM": 3,
-    "CBC": 2,
-    "ECB": 1,
+    "CBC": 3,
+    "ECB": 2,
 }
 
 BLOCK_SIZES = {
@@ -34,56 +38,81 @@ BLOCK_SIZES = {
 }
 
 
+# Wipes the contents of bytes so password is not saved.
+def _wipe_bytes(buffer):
+    if isinstance(buffer, bytearray):
+        for i in range(len(buffer)):
+            buffer[i] = 0
+    elif isinstance(buffer, memoryview):
+        buffer[:] = b"\x00" * len(buffer)
+        buffer.release()
+
+
+# Derives a 32-byte key material from a password using SHA-256
 def _derive_password_bytes(password):
     if not password:
         raise ValueError("Password is required for encryption.")
-    return SHA256.new(password.encode("utf-8")).digest()
+    digest = SHA256.new(password.encode("utf-8")).digest()
+    return bytearray(digest)
 
 
+# Produces a cipher specific key from password bytes
 def _derive_key(cipher_name, password_bytes):
+    """Derive a key sized appropriately for the selected cipher.
+    - AES-256 uses the full 32-byte digest
+    - Blowfish uses up to 32 bytes
+    - 3DES requires 24-byte parity-adjusted key"""
     if cipher_name == "AES-256":
-        return password_bytes
+        return bytearray(password_bytes)
     if cipher_name == "Blowfish":
-        return password_bytes[:32]
+        return bytearray(password_bytes[:32])
     if cipher_name == "3DES":
-        key_material = password_bytes[:24]
+        key_material = bytearray(password_bytes[:24])
         while True:
             try:
-                return DES3.adjust_key_parity(key_material)
+                adjusted = DES3.adjust_key_parity(bytes(key_material))
+                return bytearray(adjusted)
             except ValueError:
-                key_material = SHA256.new(key_material).digest()[:24]
+                key_material = bytearray(SHA256.new(bytes(key_material)).digest()[:24])
     raise ValueError(f"Unsupported cipher: {cipher_name}")
 
 
+# Encrypts plaintext according to the chosen cipher mode combo
 def _encrypt_payload(cipher_name, mode, plaintext_bytes, password_bytes):
     key = _derive_key(cipher_name, password_bytes)
     block_size = BLOCK_SIZES[cipher_name]
+    result = None
+    try:
+        if cipher_name == "AES-256" and mode == "GCM":
+            nonce = get_random_bytes(12)
+            cipher = AES.new(bytes(key), AES.MODE_GCM, nonce=nonce)
+            ciphertext, tag = cipher.encrypt_and_digest(plaintext_bytes)
+            result = [nonce, tag, ciphertext]
+        elif mode == "GCM":
+            raise ValueError(f"{cipher_name} does not support GCM mode.")
+        elif mode == "CBC":
+            iv = get_random_bytes(block_size)
+            cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+            cipher = cipher_cls.new(bytes(key), cipher_cls.MODE_CBC, iv=iv)
+            # PKCS#7-like padding then encrypt; compute digest for integrity check
+            ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
+            digest = SHA256.new(plaintext_bytes).digest()
+            result = [iv, ciphertext, digest]
+        elif mode == "ECB":
+            cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+            cipher = cipher_cls.new(bytes(key), cipher_cls.MODE_ECB)
+            # ECB has no IV; pad and add digest for integrity
+            ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
+            digest = SHA256.new(plaintext_bytes).digest()
+            result = [ciphertext, digest]
+        else:
+            raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
+        return result
+    finally:
+        _wipe_bytes(key)
 
-    if cipher_name == "AES-256" and mode == "GCM":
-        nonce = get_random_bytes(12)
-        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-        ciphertext, tag = cipher.encrypt_and_digest(plaintext_bytes)
-        return [nonce, tag, ciphertext]
 
-    if mode == "GCM":
-        raise ValueError(f"{cipher_name} does not support GCM mode.")
-
-    if mode == "CBC":
-        iv = get_random_bytes(block_size)
-        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
-        cipher = cipher_cls.new(key, cipher_cls.MODE_CBC, iv=iv)
-        ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
-        return [iv, ciphertext]
-
-    if mode == "ECB":
-        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
-        cipher = cipher_cls.new(key, cipher_cls.MODE_ECB)
-        ciphertext = cipher.encrypt(pad(plaintext_bytes, block_size))
-        return [ciphertext]
-
-    raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
-
-
+# Decrypts for passed in cipher mode combo
 def _decrypt_payload(cipher_name, mode, password_bytes, hex_parts):
     expected_parts = MODE_COMPONENTS.get(mode)
     if expected_parts is None:
@@ -93,29 +122,40 @@ def _decrypt_payload(cipher_name, mode, password_bytes, hex_parts):
 
     key = _derive_key(cipher_name, password_bytes)
     block_size = BLOCK_SIZES[cipher_name]
+    try:
+        if cipher_name == "AES-256" and mode == "GCM":
+            nonce = bytes.fromhex(hex_parts[0])
+            tag = bytes.fromhex(hex_parts[1])
+            ciphertext = bytes.fromhex(hex_parts[2])
+            cipher = AES.new(bytes(key), AES.MODE_GCM, nonce=nonce)
+            return cipher.decrypt_and_verify(ciphertext, tag)
 
-    if cipher_name == "AES-256" and mode == "GCM":
-        nonce = bytes.fromhex(hex_parts[0])
-        tag = bytes.fromhex(hex_parts[1])
-        ciphertext = bytes.fromhex(hex_parts[2])
-        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
-        return cipher.decrypt_and_verify(ciphertext, tag)
+        if mode == "CBC":
+            iv = bytes.fromhex(hex_parts[0])
+            ciphertext = bytes.fromhex(hex_parts[1])
+            digest = bytes.fromhex(hex_parts[2])
+            cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+            cipher = cipher_cls.new(bytes(key), cipher_cls.MODE_CBC, iv=iv)
+            plaintext = unpad(cipher.decrypt(ciphertext), block_size)
+            if SHA256.new(plaintext).digest() != digest:
+                raise ValueError("Integrity check failed (wrong password or corrupted file).")
+            return plaintext
 
-    if mode == "CBC":
-        iv = bytes.fromhex(hex_parts[0])
-        ciphertext = bytes.fromhex(hex_parts[1])
-        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
-        cipher = cipher_cls.new(key, cipher_cls.MODE_CBC, iv=iv)
-        return unpad(cipher.decrypt(ciphertext), block_size)
+        if mode == "ECB":
+            ciphertext = bytes.fromhex(hex_parts[0])
+            digest = bytes.fromhex(hex_parts[1])
+            cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
+            cipher = cipher_cls.new(bytes(key), cipher_cls.MODE_ECB)
+            plaintext = unpad(cipher.decrypt(ciphertext), block_size)
+            if SHA256.new(plaintext).digest() != digest:
+                raise ValueError("Integrity check failed (wrong password or corrupted file).")
+            return plaintext
 
-    if mode == "ECB":
-        ciphertext = bytes.fromhex(hex_parts[0])
-        cipher_cls = {"AES-256": AES, "Blowfish": Blowfish, "3DES": DES3}[cipher_name]
-        cipher = cipher_cls.new(key, cipher_cls.MODE_ECB)
-        return unpad(cipher.decrypt(ciphertext), block_size)
+        raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
+    finally:
+        _wipe_bytes(key)
 
-    raise ValueError(f"Unsupported cipher/mode combination: {cipher_name} with {mode}")
-
+# Popup dialog for choosing cipher and mode
 class EncryptionOptionPopup(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
@@ -126,34 +166,40 @@ class EncryptionOptionPopup(tk.Toplevel):
 
         self.result = None
         self.cipher_var = tk.StringVar(value="AES-256")
-        self.mode_var = tk.StringVar(value="GCM")
+        self.mode_var = tk.StringVar(value="CBC")
 
         frm = ttk.Frame(self, padding=12)
         frm.grid(sticky="nsew")
 
-        ttk.Label(frm, text="Cipher").grid(row=0, column=0, sticky="w")
+        # Use labeled frames to keep groups aligned and avoid visual offset
+        cipher_group = ttk.Labelframe(frm, text="Cipher")
+        cipher_group.grid(row=0, column=0, padx=(0, 12), sticky="nw")
         ciphers = list(SUPPORTED_MODES.keys())
         for i, cipher in enumerate(ciphers):
             ttk.Radiobutton(
-                frm,
+                cipher_group,
                 text=cipher,
                 variable=self.cipher_var,
                 value=cipher,
-                command=self._on_cipher_change,
-            ).grid(row=i + 1, column=0, sticky="w")
+            ).grid(row=i, column=0, sticky="w")
 
-        ttk.Label(frm, text="Mode").grid(row=0, column=0, sticky="w")
-        modes = list(SUPPORTED_MODES.values())[0]
+        mode_group = ttk.Labelframe(frm, text="Mode")
+        mode_group.grid(row=0, column=1, sticky="nw")
+        mode_frame = ttk.Frame(mode_group)
+        mode_frame.grid(row=0, column=0, sticky="w")
+        modes = ["GCM", "CBC", "ECB"]
         for i, mode in enumerate(modes):
             ttk.Radiobutton(
-                frm,
+                mode_frame,
                 text=mode,
                 variable=self.mode_var,
                 value=mode,
-            ).grid(row=i + 1, column=1, sticky="w", padx=(20, 0))
-
+            ).grid(row=i+1, column=1, sticky="w", padx=(0, 8))
+        if self.mode_var.get() not in modes:
+            self.mode_var.set("CBC")
+        
         btns = ttk.Frame(frm)
-        btns.grid(row=4, column = 0, columnspan=2, pady=(12,0), sticky="e")
+        btns.grid(row=1, column = 0, columnspan=2, pady=(12,0), sticky="e")
         ttk.Button(btns, text="Cancel", command=self.on_cancel).grid(row=0, column=1, padx=(0, 5))
         ttk.Button(btns, text="OK", command=self.on_ok).grid(row=0, column=0, padx=(0, 5))
 
@@ -162,12 +208,6 @@ class EncryptionOptionPopup(tk.Toplevel):
         self.update_idletasks()
         self.geometry(f"+{parent.winfo_rootx() + 40}+{parent.winfo_rooty() + 40}")
 
-    def _on_cipher_change(self):
-        modes = SUPPORTED_MODES[self.cipher_var.get()]
-        self.mode_combo.configure(values=modes)
-        if self.mode_var.get() not in modes:
-            self.mode_combo.current(0)
-
     def on_cancel(self):
         self.result = None
         self.destroy()
@@ -175,38 +215,40 @@ class EncryptionOptionPopup(tk.Toplevel):
     def on_ok(self):
         selected_cipher = self.cipher_var.get()
         selected_mode = self.mode_var.get()
+        if selected_mode not in SUPPORTED_MODES[selected_cipher]:
+            messagebox.showerror("Invalid Selection", f"{selected_cipher} does not support {selected_mode} mode.")
+            return
         messagebox.showinfo("Selected Encryption Options", f"You selected: {selected_cipher} with {selected_mode}")
         self.result = {"cipher": selected_cipher, "mode": selected_mode}
         self.destroy()
 
+# Shows the encryption options dialog and returns a dict with cipher mode combo.
 def choose_encryption_options():
     popup = EncryptionOptionPopup(root)
     root.wait_window(popup)
-    if popup.result["cipher"] == "Blowfish" and popup.result["mode"] == "GCM":
-        messagebox.showerror("Invalid Selection", "Blowfish does not support GCM mode. Please choose a different combination.")
-        return choose_encryption_options()
-    elif popup.result["cipher"] == "3DES" and popup.result["mode"] == "GCM":
-        messagebox.showerror("Invalid Selection", "3DES does not support GCM mode. Please choose a different combination.")
-        return choose_encryption_options()
     return popup.result
 
+# Performs an undo operation on the text if available.
 def do_undo(event=None):
     try:
         text_area.edit_undo()
     except tk.TclError:
         pass
 
+# Performs a redo operation on the text if available.
 def do_redo(event=None):
     try:
         text_area.edit_redo()
     except tk.TclError:
         pass
 
+# Prompts for cipher mode combo and password, then saves the editor content as .enc.
 def save_encrypted_file():
     options = choose_encryption_options()
     if not options:
         return 
 
+    password_encrypted = None
     try:
         password = tk.simpledialog.askstring("Password", "Enter a password for encryption:", show='*')
         if not password:
@@ -215,11 +257,13 @@ def save_encrypted_file():
     except ValueError as exc:
         messagebox.showerror("Error", str(exc))
         return
-    
+
     file_path = filedialog.asksaveasfilename(defaultextension=".enc",
                                              filetypes=[("Encrypted files", "*.enc")])
 
     if not file_path:
+        if password_encrypted is not None:
+            _wipe_bytes(password_encrypted)
         return
 
     data = text_area.get("1.0", "end-1c").encode("utf-8")
@@ -233,11 +277,16 @@ def save_encrypted_file():
         messagebox.showinfo("Success", "File saved and encrypted successfully.")
     except Exception as e:
         messagebox.showerror("Error", f"Failed to save encrypted file: {e}")
+    finally:
+        if password_encrypted is not None:
+            _wipe_bytes(password_encrypted)
 
+# Basically handles file paths for PyInstaller
 def asset_path(filename):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, filename)
 
+# Saves the editor content as plaintext .txt 
 def save_file():
     file_path = filedialog.asksaveasfilename(defaultextension=".txt",
                                              filetypes=[("Text files", "*.txt")])
@@ -246,6 +295,7 @@ def save_file():
             f.write(text_area.get(1.0, tk.END))
         text_area.edit_separator()
 
+# Opens a .txt or .enc file; for .enc prompts for password and decrypts.
 def open_file():
     file_path = filedialog.askopenfilename(filetypes=[("Text/Encrypted", "*.txt *.enc"), ("Text files", "*.txt"), ("Encrypted files", "*.enc")])
 
@@ -253,6 +303,7 @@ def open_file():
         with open(file_path, 'r', encoding="utf-8") as f:
             content = f.read()
         if file_path.endswith('.enc'):
+            # Split into header and payload body, header contains cipher mode combo info
             lines = content.splitlines()
             if not lines:
                 messagebox.showerror("Error", "Encrypted file is empty or corrupted.")
@@ -276,6 +327,7 @@ def open_file():
             parts = body.split('|')
             if parts and parts[-1] == '':
                 parts = parts[:-1]
+            password_encrypted = None
             try:
                 password = tk.simpledialog.askstring("Password", "Enter a password for decryption:", show='*')
                 if not password:
@@ -286,9 +338,12 @@ def open_file():
             except ValueError as exc:
                 messagebox.showerror("Error", f"Decryption failed: {exc}")
                 return
-            except Exception as exc:  # wrong password or corrupt data
+            except Exception as exc:
                 messagebox.showerror("Error", f"Unable to decrypt file: {exc}")
                 return
+            finally:
+                if password_encrypted is not None:
+                    _wipe_bytes(password_encrypted)
 
         text_area.delete(1.0, tk.END)
         text_area.insert(tk.END, content)
@@ -308,6 +363,7 @@ def zoom_out():
     if font_size >= 8:
         text_area.config(font=(font_name, font_size))
 
+# Creates a new document, optionally prompting to save unsaved changes.
 def new_file():
     if text_area.edit_modified():
         if messagebox.askyesno("Unsaved Changes", "You have unsaved changes. Do you want to save before creating a new file?"):
@@ -319,8 +375,10 @@ def new_file():
     text_area.edit_reset()
     text_area.edit_modified(False)
 
+# Returns a function that sets a heading/body font size via tags or base font.
 def set_text_size(font_size_label):
     def inner():
+        global current_text_size
         size_map = {
             "title": 24,
             "subtitle": 20,
@@ -347,23 +405,27 @@ def set_text_size(font_size_label):
 
     return inner
 
+# Applies bold styling to selection via a tag or to the base font.
 def bold_text():
     if text_area.tag_ranges("sel"):
         start_index = text_area.index("sel.first")
         end_index = text_area.index("sel.last")
         text_area.tag_add("bold", start_index, end_index)
         text_area.tag_configure("bold", font=(text_area.cget("font").split()[0], current_text_size, "bold"))
+        text_area.tag_raise("bold")
     else:
         current_font = text_area.cget("font").split()
         font_name = current_font[0]
         text_area.config(font=(font_name, current_text_size, "bold"))
 
+# Applies italic styling to selection via a tag or to the base font.
 def italicize_text():
     if text_area.tag_ranges("sel"):
         start_index = text_area.index("sel.first")
         end_index = text_area.index("sel.last")
         text_area.tag_add("italic", start_index, end_index)
         text_area.tag_configure("italic", font=(text_area.cget("font").split()[0], current_text_size, "italic"))
+        text_area.tag_raise("italic")
     else:
         current_font = text_area.cget("font").split()
         font_name = current_font[0]
