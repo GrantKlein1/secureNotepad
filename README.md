@@ -51,18 +51,21 @@ Optional (for packaging to an .exe/.app/.bin):
 - PyInstaller
 
 ### Build a standalone executable (Windows/macOS/Linux)
+1) Download repository zip file
+- Extract folder (secureNotepad-main)
+- Open folder (secureNotepad-main) in command line
 
-1) Install PyInstaller
+2) Install PyInstaller
 ```bash
 pip install --upgrade pyinstaller
 ```
 
-2) Build using the provided spec
+3) Build using the provided spec
 ```bash
 pyinstaller notepad.spec
 ```
 
-3) Run the built binary
+4) Run the built binary
 - Windows: `dist/cryptoSecureNotepad/cryptoSecureNotepad.exe`
 - macOS: `dist/cryptoSecureNotepad/cryptoSecureNotepad` (may need: `chmod +x` and Gatekeeper approval)
 - Linux: `dist/cryptoSecureNotepad/cryptoSecureNotepad` (`chmod +x` if needed)
